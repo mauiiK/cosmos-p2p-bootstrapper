@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # ======================================
-# Quick Install + State Sync Node Script
-# for Cosmos Hub Mainnet (cosmoshub-4)
+# Cosmos Hub (cosmoshub-4)
+# Gaia Full Node – State Sync Installer
 # ======================================
 
 ############################
-# USER CONFIG (Change if desired)
+# USER CONFIG
 ############################
 
 GAIA_HOME="$HOME/.gaia"
@@ -15,125 +15,189 @@ CHAIN_ID="cosmoshub-4"
 MONIKER="${MONIKER:-kubeo}"
 MIN_GAS="0.001uatom"
 
-# State Sync RPCs to trust for syncing
-# (multiple for redundancy)
-RPC_SERVERS="https://rpc.cosmos.network:443,https://cosmos-rpc.polkachu.com:443,https://rpc-cosmoshub-ia.cosmosia.notional.ventures:443"
+# RPC candidates (checked sequentially)
+RPC_CANDIDATES=(
+  "https://rpc.cosmos.network:443"
+  "https://cosmos-rpc.polkachu.com:443"
+  "https://rpc-cosmoshub-ia.cosmosia.notional.ventures:443"
+)
 
 ########################################
 # LOGGING
 ########################################
 
-log() { echo -e "\e[34m[`date '+%H:%M:%S'`]\e[0m $*"; }
+log() {
+  echo -e "\e[34m[`date '+%H:%M:%S'`]\e[0m $*"
+}
+
+die() {
+  echo -e "\e[31mERROR:\e[0m $*" >&2
+  exit 1
+}
 
 ########################################
-# CHECK DEPENDENCIES
+# DEPENDENCIES
 ########################################
 
 install_if_missing() {
-    if ! command -v "$1" &>/dev/null; then
-        log "Installing $1..."
-        sudo apt update
-        sudo apt install -y "$1"
-    fi
+  if ! command -v "$1" &>/dev/null; then
+    log "Installing $1..."
+    sudo apt update
+    sudo apt install -y "$1"
+  fi
 }
 
 log "=== Checking dependencies ==="
-for tool in curl jq wget tar sed tmux; do
-    install_if_missing "$tool"
+for tool in curl jq wget tar sed tmux gzip; do
+  install_if_missing "$tool"
 done
 
 ########################################
-# INSTALL gaiad (official Gaia release)
+# INSTALL GAIAD
 ########################################
 
-log "=== Installing Cosmos Gaia ==="
-# Try downloading prebuilt binary if available
-GAIA_VERSION="v28.0.1" # adjust if a newer recommended version exists
-BIN="gaiad"
+log "=== Installing gaiad ==="
+
+GAIA_VERSION="v28.0.1"
 INSTALL_DIR="$HOME/go/bin"
 
 if ! command -v gaiad &>/dev/null; then
-    mkdir -p "$INSTALL_DIR"
-    log "Downloading gaiad $GAIA_VERSION..."
-    wget -q "https://github.com/cosmos/gaia/releases/download/${GAIA_VERSION}/gaiad_${GAIA_VERSION}_linux_amd64.tar.gz"
-    tar -xzf "gaiad_${GAIA_VERSION}_linux_amd64.tar.gz"
-    mv gaiad "$INSTALL_DIR/"
-    rm -f "gaiad_${GAIA_VERSION}_linux_amd64.tar.gz"
-    export PATH="$INSTALL_DIR:$PATH"
+  mkdir -p "$INSTALL_DIR"
+  wget -q "https://github.com/cosmos/gaia/releases/download/${GAIA_VERSION}/gaiad_${GAIA_VERSION}_linux_amd64.tar.gz"
+  tar -xzf "gaiad_${GAIA_VERSION}_linux_amd64.tar.gz"
+  mv gaiad "$INSTALL_DIR/"
+  rm -f "gaiad_${GAIA_VERSION}_linux_amd64.tar.gz"
+  export PATH="$INSTALL_DIR:$PATH"
 else
-    log "gaiad already installed: $(gaiad version)"
+  log "gaiad already installed: $(gaiad version)"
 fi
 
 ########################################
-# INIT COSMOS CONFIG
+# INIT
 ########################################
 
-log "=== Initializing Gaia config for cosmoshub-4 ==="
+log "=== Initializing chain ==="
 rm -rf "$GAIA_HOME"
 gaiad init "$MONIKER" --chain-id "$CHAIN_ID" --home "$GAIA_HOME"
 
 ########################################
-# DOWNLOAD GENESIS + ADDRBOOK
+# GENESIS
 ########################################
 
-log "=== Downloading mainnet genesis and addrbook ==="
-# errors here
+log "=== Downloading genesis ==="
 mkdir -p "$GAIA_HOME/config"
-curl -Ls "https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz" \
-     -o "$GAIA_HOME/config/genesis.json.gz"
-gzip -d -f "$GAIA_HOME/config/genesis.json.gz"
 
-# Optional: community published addrbook for peers
-curl -Ls "https://snapshots.kjnodes.com/cosmoshub/addrbook.json" \
-     -o "$GAIA_HOME/config/addrbook.json"
+GENESIS_TMP="$GAIA_HOME/config/genesis.json.gz.tmp"
+GENESIS_FINAL="$GAIA_HOME/config/genesis.json"
+
+rm -f "$GENESIS_TMP" "$GENESIS_FINAL"
+
+curl -L --fail --retry 5 --retry-delay 3 \
+  "https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz" \
+  -o "$GENESIS_TMP"
+
+gzip -dc "$GENESIS_TMP" > "$GENESIS_FINAL"
+rm -f "$GENESIS_TMP"
 
 ########################################
-# CONFIGURE PERSISTENT PEERS (optional)
+# ADDRBOOK (BIG FILE SAFE DOWNLOAD)
 ########################################
 
-log "=== Updating peers ==="
+log "=== Downloading addrbook (large file, resumable) ==="
+
+ADDR_TMP="$GAIA_HOME/config/addrbook.json.tmp"
+ADDR_FINAL="$GAIA_HOME/config/addrbook.json"
+
+curl -L \
+  --fail \
+  --retry 10 \
+  --retry-delay 5 \
+  --connect-timeout 20 \
+  --max-time 0 \
+  --continue-at - \
+  "https://snapshots.kjnodes.com/cosmoshub/addrbook.json" \
+  -o "$ADDR_TMP"
+
+mv "$ADDR_TMP" "$ADDR_FINAL"
+
+########################################
+# PEERS
+########################################
+
+log "=== Configuring peers ==="
+
 PEERS="d6318b3bd51a5e2b8ed08f2e520d50289ed32bf1@52.79.43.100:26656"
-sed -i "s/^persistent_peers *=.*/persistent_peers = \"$PEERS\"/" "$GAIA_HOME/config/config.toml"
+
+sed -i "s/^persistent_peers *=.*/persistent_peers = \"$PEERS\"/" \
+  "$GAIA_HOME/config/config.toml"
 
 ########################################
-# STATE SYNC SETUP
+# PICK HEALTHY RPC
 ########################################
 
-log "=== Configuring State Sync ==="
+log "=== Selecting healthy RPC ==="
 
-LATEST=$(curl -s "$RPC_SERVERS"/status | jq -r '.result.sync_info.latest_block_height')
-# Use a safe height ~1000 blocks prior
-TRUST_HEIGHT=$((LATEST - 1000))
-TRUST_HASH=$(curl -s "$RPC_SERVERS"/block?height=$TRUST_HEIGHT | jq -r '.result.block_id.hash')
+RPC=""
+for CANDIDATE in "${RPC_CANDIDATES[@]}"; do
+  if curl -sf "$CANDIDATE/status" | jq -e '.result.sync_info.latest_block_height' >/dev/null; then
+    RPC="$CANDIDATE"
+    break
+  fi
+done
 
-log "HEIGHT $LATEST, TRUST_HEIGHT $TRUST_HEIGHT, HASH $TRUST_HASH"
+[ -z "$RPC" ] && die "No healthy RPC endpoint found"
 
-sed -i "s|enable *=.*|enable = true|" "$GAIA_HOME/config/config.toml"
-sed -i "s|rpc_servers *=.*|rpc_servers = \"$RPC_SERVERS\"|" "$GAIA_HOME/config/config.toml"
-sed -i "s|trust_height *=.*|trust_height = $TRUST_HEIGHT|" "$GAIA_HOME/config/config.toml"
-sed -i "s|trust_hash *=.*|trust_hash = \"$TRUST_HASH\"|" "$GAIA_HOME/config/config.toml"
+log "Using RPC: $RPC"
 
 ########################################
-# SET MIN GAS PRICES
+# STATE SYNC
+########################################
+
+log "=== Configuring state sync ==="
+
+LATEST_HEIGHT=$(curl -s "$RPC/status" | jq -r '.result.sync_info.latest_block_height')
+[ "$LATEST_HEIGHT" = "null" ] && die "Failed to fetch latest height"
+
+TRUST_HEIGHT=$((LATEST_HEIGHT - 1000))
+
+TRUST_HASH=$(curl -s "$RPC/block?height=$TRUST_HEIGHT" | jq -r '.result.block_id.hash')
+[ "$TRUST_HASH" = "null" ] && die "Failed to fetch trust hash"
+
+log "Latest height : $LATEST_HEIGHT"
+log "Trust height  : $TRUST_HEIGHT"
+log "Trust hash    : $TRUST_HASH"
+
+sed -i \
+  -e "s|enable *=.*|enable = true|" \
+  -e "s|rpc_servers *=.*|rpc_servers = \"$RPC,$RPC\"|" \
+  -e "s|trust_height *=.*|trust_height = $TRUST_HEIGHT|" \
+  -e "s|trust_hash *=.*|trust_hash = \"$TRUST_HASH\"|" \
+  "$GAIA_HOME/config/config.toml"
+
+########################################
+# GAS
 ########################################
 
 log "=== Setting minimum gas prices ==="
-sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml"
+
+sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" \
+  "$GAIA_HOME/config/app.toml"
 
 ########################################
 # START NODE
 ########################################
 
-log "=== Starting Gaia in tmux session cosmoshub_node ==="
+log "=== Starting gaiad ==="
+
 SESSION="cosmoshub_node"
+
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-    log "Attaching to existing session..."
-    tmux attach -t "$SESSION"
+  tmux attach -t "$SESSION"
 else
-    tmux new-session -d -s "$SESSION" "gaiad start --x-crisis-skip-assert-invariants --home '$GAIA_HOME'"
-    log "Node started. Attach with: tmux attach -t $SESSION"
+  tmux new-session -d -s "$SESSION" \
+    "gaiad start --x-crisis-skip-assert-invariants --home $GAIA_HOME"
+  log "Node running in tmux session: $SESSION"
+  log "Attach with: tmux attach -t $SESSION"
 fi
 
-log "=== DONE — Syncing mainnet ==="
-echo "Use: gaiad query bank balances <your_address> --home $GAIA_HOME"
-echo "Use: gaiad tx bank send <to_address> <amt>uatom --home $GAIA_HOME --chain-id cosmoshub-4"
+log "=== DONE – STATE SYNC IN PROGRESS ==="
