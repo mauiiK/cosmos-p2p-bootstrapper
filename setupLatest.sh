@@ -16,6 +16,9 @@ GENESIS_URLS=(
 # Persistent peers
 PEERS="ba3bacc714817218562f743178228f23678b2873@public-seed-node.cosmoshub.certus.one:26656,ade4d8bc8cbe0146ebdf3cb7b1e9ad36f412c0@seeds.polkachu.com:14956"
 
+# Tmux session name
+SESSION_NAME="gaia_node"
+
 # ==== UTILITY FUNCTIONS ====
 log() { echo "[`date '+%H:%M:%S'`] $*"; }
 
@@ -38,6 +41,12 @@ download_genesis() {
             size=$(stat -c%s "$GAIA_HOME/config/genesis.json" 2>/dev/null || echo 0)
             if [[ "$size" -gt 100000 ]]; then
                 log "Genesis downloaded successfully: $(ls -lh $GAIA_HOME/config/genesis.json)"
+                # Quick validity check: must start with '{'
+                first_char=$(head -c 1 "$GAIA_HOME/config/genesis.json")
+                if [[ "$first_char" != "{" ]]; then
+                    log "Genesis file invalid (does not start with '{'), trying next URL..."
+                    continue
+                fi
                 return 0
             else
                 log "Genesis file too small ($size bytes), trying next URL..."
@@ -62,6 +71,7 @@ log "[2] Initializing Gaia node..."
 gaiad init "$MONIKER" --chain-id "$CHAIN_ID" --home "$GAIA_HOME"
 
 log "[3] Downloading genesis..."
+mkdir -p "$GAIA_HOME/config"
 download_genesis
 
 log "[4] Setting minimum gas prices..."
@@ -78,12 +88,13 @@ log "[6] Summary of config files:"
 ls -lh "$GAIA_HOME/config"
 
 # ==== START NODE IN TMUX ====
-SESSION_NAME="gaia_node"
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     log "Tmux session $SESSION_NAME already exists, attaching..."
     tmux attach -t "$SESSION_NAME"
 else
     log "[7] Starting Gaia node inside tmux session '$SESSION_NAME'..."
-    tmux new-session -d -s "$SESSION_NAME" "gaiad start --home '$GAIA_HOME' --minimum-gas-prices='$MIN_GAS'"
-    log "Node started in background tmux session. Attach anytime with: tmux attach -t $SESSION_NAME"
+    # Start Gaia in a background tmux session with logs visible
+    tmux new-session -d -s "$SESSION_NAME" "gaiad start --home '$GAIA_HOME' --minimum-gas-prices='$MIN_GAS' 2>&1 | tee '$GAIA_HOME/gaia.log'"
+    log "Node started in background tmux session."
+    log "Attach anytime with: tmux attach -t $SESSION_NAME"
 fi
