@@ -90,7 +90,8 @@ gaiad keys add "$WALLET_NAME" --home "$GAIA_HOME" --keyring-backend test
 
 ADDR=$(gaiad keys show "$WALLET_NAME" -a --home "$GAIA_HOME" --keyring-backend test)
 log "Adding genesis account with $STAKE_AMOUNT to $ADDR"
-gaiad add-genesis-account "$ADDR" "$STAKE_AMOUNT" --home "$GAIA_HOME" --keyring-backend test
+# gaiad add-genesis-account "$ADDR" "$STAKE_AMOUNT" --home "$GAIA_HOME" --keyring-backend test
+gaiad genesis add-genesis-account "$ADDR" "$STAKE_AMOUNT" --home "$GAIA_HOME" --keyring-backend test
 
 ########################################
 # GENERATE GENTX
