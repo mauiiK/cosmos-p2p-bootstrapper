@@ -108,7 +108,8 @@ gaiad genesis collect-gentxs --home "$GAIA_HOME"
 ########################################
 
 log "Validating genesis file..."
-gaiad validate-genesis --home "$GAIA_HOME"
+# gaiad validate-genesis --home "$GAIA_HOME"
+gaiad genesis validate-genesis --home "$GAIA_HOME"
 
 ########################################
 # START NODE (tmux)
