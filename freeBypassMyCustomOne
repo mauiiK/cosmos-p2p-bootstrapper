@@ -10,7 +10,7 @@ CHAIN_ID="cosmoshub-4"
 MONIKER="my-node"
 MIN_GAS="0.025uatom"
 SESSION_NAME="gaia_node"
-WALLET_NAME="${WALLET_NAME:-mywallet}" # Default wallet name if not prompted
+WALLET_NAME="${WALLET_NAME:-mywallet}" # default wallet name
 
 # Fallback genesis URLs
 GENESIS_URLS=(
@@ -18,10 +18,10 @@ GENESIS_URLS=(
     "https://cosmoshub.stake.link/genesis.json"
 )
 
-# Some known public seed nodes
+# Public seed nodes
 PEERS="ba3bacc714817218562f743178228f23678b2873@public-seed-node.cosmoshub.certus.one:26656,ade4d8bc8cbe0146ebdf3cb7b1e9ad36f412c0@seeds.polkachu.com:14956"
 
-# RPC server for state sync
+# Cosmos RPC for state sync
 RPC="https://rpc.cosmos.network:443"
 
 ########################################
@@ -32,10 +32,22 @@ log() { echo -e "\e[34m[`date '+%H:%M:%S'`]\e[0m $*"; }
 
 check_command() {
     if ! command -v "$1" &>/dev/null; then
-        log ">> Installing missing command: $1"
+        log "Installing missing command: $1"
         sudo apt update
         sudo apt install -y "$1"
     fi
+}
+
+install_go() {
+    log "Installing Go 1.23..."
+    sudo rm -rf /usr/local/go
+    wget https://go.dev/dl/go1.23.linux-amd64.tar.gz
+    sudo tar -C /usr/local -xzf go1.23.linux-amd64.tar.gz
+    rm go1.23.linux-amd64.tar.gz
+    export PATH=/usr/local/go/bin:$PATH
+    echo 'export PATH=/usr/local/go/bin:$PATH' >> ~/.profile
+    source ~/.profile
+    log "Go version: $(go version)"
 }
 
 download_genesis() {
@@ -44,7 +56,7 @@ download_genesis() {
         log "Trying genesis from: $url"
         if curl -sL "$url" -o "$GAIA_HOME/config/genesis.json"; then
             if [[ -s "$GAIA_HOME/config/genesis.json" && $(head -c1 "$GAIA_HOME/config/genesis.json") == "{" ]]; then
-                log "Genesis downloaded and looks valid!"
+                log "Genesis downloaded successfully!"
                 ls -lh "$GAIA_HOME/config/genesis.json"
                 return 0
             fi
@@ -56,7 +68,7 @@ download_genesis() {
 }
 
 ########################################
-# INSTALL DEPENDENCIES
+# REQUIREMENTS
 ########################################
 
 log "=== Checking required tools ==="
@@ -64,22 +76,7 @@ for cmd in curl jq gzip tar sed tmux git make g++; do
     check_command "$cmd"
 done
 
-########################################
-# INSTALL GO 1.23.6 if needed
-########################################
-
-GO_VERSION="1.23.6"
-if ! go version 2>/dev/null | grep -q "go$GO_VERSION"; then
-    log "Installing Go $GO_VERSION..."
-    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
-    sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-    rm go${GO_VERSION}.linux-amd64.tar.gz
-    export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
-    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.profile
-    source ~/.profile
-fi
-log "Using Go version: $(go version)"
+install_go
 
 ########################################
 # BUILD GAIA v24
@@ -98,7 +95,6 @@ git checkout v24.0.0
 
 log "Building Gaia (this may take ~2-4 minutes)..."
 make install
-
 log "Gaia version: $(gaiad version)"
 
 ########################################
@@ -123,8 +119,11 @@ download_genesis
 ########################################
 
 log "=== Setting minimum gas prices ==="
-sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml" || \
+if grep -q "^minimum-gas-prices" "$GAIA_HOME/config/app.toml"; then
+    sed -i "s|^minimum-gas-prices=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml"
+else
     echo "minimum-gas-prices = \"$MIN_GAS\"" >> "$GAIA_HOME/config/app.toml"
+fi
 
 ########################################
 # ADD PEERS
@@ -137,14 +136,14 @@ sed -i "s|^persistent_peers *=.*|persistent_peers = \"$PEERS\"|" "$GAIA_HOME/con
 # STATE SYNC CONFIGURATION
 ########################################
 
-log "=== Enabling state sync using RPC $RPC ==="
+log "=== Enabling state sync ==="
 LATEST_HEIGHT=$(curl -s "$RPC/status" | jq -r '.result.sync_info.latest_block_height')
 TRUST_HEIGHT=$((LATEST_HEIGHT - 5000))
 TRUST_HASH=$(curl -s "$RPC/block?height=$TRUST_HEIGHT" | jq -r '.result.block_id.hash')
 
 log "Latest height: $LATEST_HEIGHT"
-log "Using trust_height: $TRUST_HEIGHT"
-log "Using trust_hash: $TRUST_HASH"
+log "Trust height: $TRUST_HEIGHT"
+log "Trust hash: $TRUST_HASH"
 
 sed -i "s|^enable *=.*|enable = true|" "$GAIA_HOME/config/config.toml"
 sed -i "s|^rpc_servers *=.*|rpc_servers = \"$RPC,$RPC\"|" "$GAIA_HOME/config/config.toml"
@@ -159,7 +158,7 @@ log "=== Config summary ==="
 ls -lh "$GAIA_HOME/config"
 
 ########################################
-# START NODE IN TMUX
+# START NODE (tmux)
 ########################################
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -169,24 +168,24 @@ else
     log "Starting Gaia node in tmux session: $SESSION_NAME"
     tmux new-session -d -s "$SESSION_NAME" \
         "gaiad start --home '$GAIA_HOME' --minimum-gas-prices='$MIN_GAS'"
-    log "Node started in tmux session. Attach at any time:"
-    log "  tmux attach -t $SESSION_NAME"
+    log "Node started in tmux session. Attach: tmux attach -t $SESSION_NAME"
 fi
 
 ########################################
-# CREATE OR SHOW WALLET
+# CREATE WALLET
 ########################################
 
-if ! gaiad keys list --home "$GAIA_HOME" --keyring-backend test | grep -q "$WALLET_NAME"; then
-    log "Creating wallet: $WALLET_NAME"
-    gaiad keys add "$WALLET_NAME" --home "$GAIA_HOME" --keyring-backend test
-fi
+read -p "Enter a wallet name (default: $WALLET_NAME): " input
+if [[ -n "$input" ]]; then WALLET_NAME="$input"; fi
+
+log "Creating wallet: $WALLET_NAME"
+gaiad keys add "$WALLET_NAME" --home "$GAIA_HOME" --keyring-backend test
 
 ADDRESS=$(gaiad keys show "$WALLET_NAME" -a --home "$GAIA_HOME" --keyring-backend test)
-log "Wallet address: $ADDRESS"
+log "Your wallet address is: $ADDRESS"
 
 log "=== DONE ==="
-echo "Check balance (once synced):"
+echo "Check balances once synced:"
 echo "  gaiad query bank balances $ADDRESS --home $GAIA_HOME"
-echo "Send transactions:"
+echo "Send txs like:"
 echo "  gaiad tx bank send $ADDRESS <to_address> 10uatom --home $GAIA_HOME --fees $MIN_GAS --chain-id $CHAIN_ID"
