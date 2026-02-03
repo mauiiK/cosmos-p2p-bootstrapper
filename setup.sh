@@ -1,4 +1,5 @@
 #!/bin/bash
+# Please note this resets configs, if you already partially or fully installed use the helper.sh instead or you can potentially LOSE earnings!!
 set -euo pipefail
 
 # =====================
