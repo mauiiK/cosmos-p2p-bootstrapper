@@ -1,124 +1,127 @@
 #!/bin/bash
-# Please note this resets configs, if you already partially or fully installed use the helper.sh instead or you can potentially LOSE earnings!!
 set -euo pipefail
 
-# =====================
-# CONFIGURATION
-# =====================
-GAIA_HOME="${HOME}/.gaia"
+# =========================
+# User Config
+# =========================
+GAIA_HOME="$HOME/.gaia"
 CHAIN_ID="cosmoshub-4"
 MONIKER="my-node"
 MIN_GAS="0.025uatom"
-EXPECTED_GENESIS_SIZE=5000000  # bytes, approximate for fallback logic
 
-# Multiple potential genesis/snapshot URLs
+# Correct Gaia version for Cosmos Hub v20
+GAIA_VERSION="v20.0.0"
+
+# Official genesis / snapshot sources (fallback list)
 GENESIS_URLS=(
-  "https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz"
-  "https://snapshots-cosmoshub.certus.one/genesis.json.gz"
-  "https://snapshots.polkachu.com/genesis.json.gz"
+  "https://github.com/cosmos/mainnet/raw/master/genesis/cosmoshub-4.json"
+  "https://cosmoshub-snapshots.polkachu.com/genesis.json"
+  "https://cosmoshub-snapshots.certus.one/genesis.json"
 )
 
+# Persistent peers
 PEERS="ba3bacc714817218562f743178228f23678b2873@public-seed-node.cosmoshub.certus.one:26656,ade4d8bc8cbe0146ebdf3cb7b1e9ad36f412c0@seeds.polkachu.com:14956"
 
-# =====================
-# HELPER FUNCTIONS
-# =====================
+# =========================
+# Helpers
+# =========================
+
 function log() {
     echo -e "[`date +"%H:%M:%S"`] $1"
 }
 
-function check_install() {
-    command -v $1 >/dev/null 2>&1 || {
+function ensure_cmd() {
+    if ! command -v "$1" &>/dev/null; then
         log "$1 not found. Installing..."
-        if [[ "$1" == "gaiad" ]]; then
-            log "Please install gaiad manually from https://docs.cosmos.network/master/run-node/install.html"
-            exit 1
-        elif [[ "$1" == "apt-get" ]]; then
-            sudo apt update
+        if [[ "$1" == "curl" || "$1" == "jq" || "$1" == "gzip" || "$1" == "sed" ]]; then
+            sudo apt-get update && sudo apt-get install -y "$1"
         else
-            sudo apt install -y $1
+            log "Please install $1 manually."
+            exit 1
         fi
-    }
+    fi
 }
 
 function download_genesis() {
-    local url=$1
-    local dest=$2
-
-    log "Attempting to download genesis from $url"
-    curl -fSL "$url" -o "$dest" && log "Downloaded $url successfully" && return 0
-    log "Failed to download from $url"
-    return 1
+    for url in "${GENESIS_URLS[@]}"; do
+        log "Trying $url ..."
+        curl -Ls "$url" -o "$GAIA_HOME/config/genesis.json"
+        if [[ -s "$GAIA_HOME/config/genesis.json" ]]; then
+            log "Genesis downloaded successfully."
+            return 0
+        else
+            log "Failed to download genesis from $url, trying next..."
+        fi
+    done
+    log "All genesis download attempts failed."
+    exit 1
 }
 
-# =====================
-# CHECK DEPENDENCIES
-# =====================
-log "Checking dependencies..."
-for cmd in gaiad curl gzip sed tar lz4; do
-    check_install $cmd
-done
+function check_gaiad_version() {
+    if ! command -v gaiad &>/dev/null || [[ "$(gaiad version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')" != "${GAIA_VERSION#v}" ]]; then
+        log "Installing Gaia $GAIA_VERSION..."
+        curl -Ls https://github.com/cosmos/gaia/releases/download/$GAIA_VERSION/gaiad-$GAIA_VERSION-linux-amd64 -o /usr/local/bin/gaiad
+        chmod +x /usr/local/bin/gaiad
+    fi
+}
 
-# =====================
-# CLEAN OLD DATA
-# =====================
+# =========================
+# Install dependencies
+# =========================
+ensure_cmd curl
+ensure_cmd jq
+ensure_cmd gzip
+ensure_cmd sed
+
+# =========================
+# Check Gaia version
+# =========================
+check_gaiad_version
+
+# =========================
+# Clean old data
+# =========================
 log "Removing old Gaia data..."
 rm -rf "$GAIA_HOME"
 
-# =====================
-# INIT GAIA NODE
-# =====================
+# =========================
+# Initialize Gaia
+# =========================
 log "Initializing Gaia node..."
 gaiad init "$MONIKER" --chain-id "$CHAIN_ID" --home "$GAIA_HOME"
 
-# =====================
-# DOWNLOAD & DECOMPRESS GENESIS
-# =====================
-GENESIS_DEST="$GAIA_HOME/config/genesis.json.gz"
-SUCCESS=false
+# =========================
+# Download Genesis
+# =========================
+log "Downloading Genesis..."
+download_genesis
 
-for url in "${GENESIS_URLS[@]}"; do
-    if download_genesis "$url" "$GENESIS_DEST"; then
-        FILE_SIZE=$(stat -c%s "$GENESIS_DEST" 2>/dev/null || stat -f%z "$GENESIS_DEST")
-        log "Downloaded file size: $FILE_SIZE bytes"
-        if (( FILE_SIZE >= EXPECTED_GENESIS_SIZE )); then
-            SUCCESS=true
-            break
-        else
-            log "File size smaller than expected ($EXPECTED_GENESIS_SIZE), trying next URL..."
-        fi
-    fi
-done
-
-if [ "$SUCCESS" = false ]; then
-    log "Failed to download a valid genesis file from all sources. Exiting."
-    exit 1
+# =========================
+# Set minimum gas prices
+# =========================
+log "Setting minimum gas prices..."
+if grep -q "^minimum-gas-prices" "$GAIA_HOME/config/app.toml"; then
+    sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml"
+else
+    echo "minimum-gas-prices = \"$MIN_GAS\"" >> "$GAIA_HOME/config/app.toml"
 fi
 
-log "Decompressing genesis..."
-gzip -d -f "$GENESIS_DEST"
-
-# =====================
-# CONFIGURE GAIA
-# =====================
-log "Setting minimum gas prices..."
-sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml" \
-    || echo "minimum-gas-prices = \"$MIN_GAS\"" >> "$GAIA_HOME/config/app.toml"
-
+# =========================
+# Add persistent peers
+# =========================
 log "Adding persistent peers..."
-sed -i "s|^persistent_peers *=.*|persistent_peers = \"$PEERS\"|" "$GAIA_HOME/config/config.toml" \
-    || echo "persistent_peers = \"$PEERS\"" >> "$GAIA_HOME/config/config.toml"
+sed -i "s|^persistent_peers *=.*|persistent_peers = \"$PEERS\"|" "$GAIA_HOME/config/config.toml"
 
-# =====================
-# SUMMARY
-# =====================
-log "[SUMMARY]"
+# =========================
+# Show summary
+# =========================
+log "Genesis file:"
 ls -lh "$GAIA_HOME/config/genesis.json"
-echo "Config files in $GAIA_HOME/config:"
+log "Config files in $GAIA_HOME/config:"
 ls "$GAIA_HOME/config"
 
-# =====================
-# START NODE
-# =====================
+# =========================
+# Start Gaia
+# =========================
 log "Starting Gaia node..."
 gaiad start --home "$GAIA_HOME" --minimum-gas-prices="$MIN_GAS"
