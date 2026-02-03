@@ -1,76 +1,69 @@
 #!/bin/bash
 set -euo pipefail
 
-# -------------------------------
-# Gaia mainnet node installer
-# -------------------------------
-
-GAIA_HOME="${GAIA_HOME:-$HOME/.gaia}"
+# ==== CONFIG ====
+GAIA_HOME="$HOME/.gaia"
 CHAIN_ID="cosmoshub-4"
 MONIKER="my-node"
 MIN_GAS="0.025uatom"
+
+# Genesis sources fallback
 GENESIS_URLS=(
     "https://snapshots-cosmoshub.mirror.guru/genesis.json"
-    "https://mainnet-genesis.cosmos.network/genesis.json"
+    "https://github.com/cosmos/mainnet/raw/master/genesis/cosmoshub-4.json"
 )
 
+# Persistent peers
 PEERS="ba3bacc714817218562f743178228f23678b2873@public-seed-node.cosmoshub.certus.one:26656,ade4d8bc8cbe0146ebdf3cb7b1e9ad36f412c0@seeds.polkachu.com:14956"
 
-# -------------------------------
-# Logging helpers
-# -------------------------------
-log() { echo -e "[`date '+%H:%M:%S'`] $*"; }
+# ==== UTILITY FUNCTIONS ====
+log() { echo "[`date '+%H:%M:%S'`] $*"; }
 
-# -------------------------------
-# Tool checks and install
-# -------------------------------
-log "Checking required commands..."
-for cmd in gaiad curl jq gzip sed; do
-    if ! command -v $cmd &>/dev/null; then
-        log "$cmd not found. Installing..."
-        if [[ "$cmd" == "gaiad" ]]; then
-            log "Please install gaiad manually: https://docs.cosmos.network/main/tools/gaia"
-            exit 1
+check_command() {
+    if ! command -v "$1" &>/dev/null; then
+        log "$1 not found, installing..."
+        if [[ "$1" == "tmux" || "$1" == "curl" || "$1" == "gzip" || "$1" == "sed" ]]; then
+            sudo apt update && sudo apt install -y "$1"
         else
-            sudo apt-get update && sudo apt-get install -y $cmd
+            log "Please install $1 manually."
+            exit 1
         fi
     fi
-done
+}
 
-# -------------------------------
-# Clean old data
-# -------------------------------
+download_genesis() {
+    for url in "${GENESIS_URLS[@]}"; do
+        log "Trying $url ..."
+        if curl -sL "$url" -o "$GAIA_HOME/config/genesis.json"; then
+            size=$(stat -c%s "$GAIA_HOME/config/genesis.json" 2>/dev/null || echo 0)
+            if [[ "$size" -gt 100000 ]]; then
+                log "Genesis downloaded successfully: $(ls -lh $GAIA_HOME/config/genesis.json)"
+                return 0
+            else
+                log "Genesis file too small ($size bytes), trying next URL..."
+            fi
+        fi
+    done
+    log "Failed to download a valid genesis.json"
+    exit 1
+}
+
+# ==== MAIN SCRIPT ====
+log "Checking dependencies..."
+check_command curl
+check_command gzip
+check_command sed
+check_command tmux
+
 log "[1] Removing old Gaia data..."
 rm -rf "$GAIA_HOME"
 
-# -------------------------------
-# Initialize Gaia node
-# -------------------------------
 log "[2] Initializing Gaia node..."
 gaiad init "$MONIKER" --chain-id "$CHAIN_ID" --home "$GAIA_HOME"
 
-# -------------------------------
-# Download genesis with fallback
-# -------------------------------
-download_genesis() {
-    for url in "${GENESIS_URLS[@]}"; do
-        log "[3] Downloading genesis from $url ..."
-        curl -Ls "$url" -o "$GAIA_HOME/config/genesis.json"
-        if jq empty "$GAIA_HOME/config/genesis.json" &>/dev/null; then
-            log "Genesis downloaded and validated successfully."
-            return 0
-        else
-            log "Genesis invalid JSON from $url, trying next..."
-        fi
-    done
-    log "All genesis download attempts failed. Exiting."
-    exit 1
-}
+log "[3] Downloading genesis..."
 download_genesis
 
-# -------------------------------
-# Set minimum gas prices
-# -------------------------------
 log "[4] Setting minimum gas prices..."
 if grep -q "^minimum-gas-prices" "$GAIA_HOME/config/app.toml"; then
     sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml"
@@ -78,23 +71,19 @@ else
     echo "minimum-gas-prices = \"$MIN_GAS\"" >> "$GAIA_HOME/config/app.toml"
 fi
 
-# -------------------------------
-# Add persistent peers
-# -------------------------------
 log "[5] Adding persistent peers..."
 sed -i "s|^persistent_peers *=.*|persistent_peers = \"$PEERS\"|" "$GAIA_HOME/config/config.toml"
 
-# -------------------------------
-# Show summary
-# -------------------------------
-log "[SUMMARY] Genesis file:"
-ls -lh "$GAIA_HOME/config/genesis.json"
-log "Config files in $GAIA_HOME/config:"
-ls "$GAIA_HOME/config"
+log "[6] Summary of config files:"
+ls -lh "$GAIA_HOME/config"
 
-# -------------------------------
-# Start Gaia node
-# -------------------------------
-log "[6] Starting Gaia node..."
-log "If this is the first run, it will take some time to initialize..."
-gaiad start --home "$GAIA_HOME" --minimum-gas-prices="$MIN_GAS"
+# ==== START NODE IN TMUX ====
+SESSION_NAME="gaia_node"
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    log "Tmux session $SESSION_NAME already exists, attaching..."
+    tmux attach -t "$SESSION_NAME"
+else
+    log "[7] Starting Gaia node inside tmux session '$SESSION_NAME'..."
+    tmux new-session -d -s "$SESSION_NAME" "gaiad start --home '$GAIA_HOME' --minimum-gas-prices='$MIN_GAS'"
+    log "Node started in background tmux session. Attach anytime with: tmux attach -t $SESSION_NAME"
+fi
