@@ -84,7 +84,7 @@ curl -Ls "https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub
 gzip -d -f "$GAIA_HOME/config/genesis.json.gz"
 
 # Optional: community published addrbook for peers
-curl -Ls "https://dl2.quicksync.io/json/addrbook.cosmos.json" \
+curl -Ls "https://snapshots.kjnodes.com/cosmoshub/addrbook.json" \
      -o "$GAIA_HOME/config/addrbook.json"
 
 ########################################
