@@ -1,0 +1,192 @@
+#!/bin/bash
+set -euo pipefail
+
+########################################
+# USER CONFIG
+########################################
+
+GAIA_HOME="$HOME/.gaia"
+CHAIN_ID="cosmoshub-4"
+MONIKER="my-node"
+MIN_GAS="0.025uatom"
+SESSION_NAME="gaia_node"
+WALLET_NAME="${WALLET_NAME:-mywallet}" # Default wallet name if not prompted
+
+# Fallback genesis URLs
+GENESIS_URLS=(
+    "https://cosmoshub.snapshots.nodestake.top/genesis.json"
+    "https://cosmoshub.stake.link/genesis.json"
+)
+
+# Some known public seed nodes
+PEERS="ba3bacc714817218562f743178228f23678b2873@public-seed-node.cosmoshub.certus.one:26656,ade4d8bc8cbe0146ebdf3cb7b1e9ad36f412c0@seeds.polkachu.com:14956"
+
+# RPC server for state sync
+RPC="https://rpc.cosmos.network:443"
+
+########################################
+# HELPER FUNCTIONS
+########################################
+
+log() { echo -e "\e[34m[`date '+%H:%M:%S'`]\e[0m $*"; }
+
+check_command() {
+    if ! command -v "$1" &>/dev/null; then
+        log ">> Installing missing command: $1"
+        sudo apt update
+        sudo apt install -y "$1"
+    fi
+}
+
+download_genesis() {
+    mkdir -p "$GAIA_HOME/config"
+    for url in "${GENESIS_URLS[@]}"; do
+        log "Trying genesis from: $url"
+        if curl -sL "$url" -o "$GAIA_HOME/config/genesis.json"; then
+            if [[ -s "$GAIA_HOME/config/genesis.json" && $(head -c1 "$GAIA_HOME/config/genesis.json") == "{" ]]; then
+                log "Genesis downloaded and looks valid!"
+                ls -lh "$GAIA_HOME/config/genesis.json"
+                return 0
+            fi
+        fi
+        log "Genesis invalid from $url, trying next..."
+    done
+    log "ERROR: could not get a valid genesis.json"
+    exit 1
+}
+
+########################################
+# INSTALL DEPENDENCIES
+########################################
+
+log "=== Checking required tools ==="
+for cmd in curl jq gzip tar sed tmux git make g++; do
+    check_command "$cmd"
+done
+
+########################################
+# INSTALL GO 1.23.6 if needed
+########################################
+
+GO_VERSION="1.23.6"
+if ! go version 2>/dev/null | grep -q "go$GO_VERSION"; then
+    log "Installing Go $GO_VERSION..."
+    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
+    rm go${GO_VERSION}.linux-amd64.tar.gz
+    export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.profile
+    source ~/.profile
+fi
+log "Using Go version: $(go version)"
+
+########################################
+# BUILD GAIA v24
+########################################
+
+log "=== Cloning and building Gaia v24 ==="
+mkdir -p "$HOME/cosmos"
+cd "$HOME/cosmos"
+
+if [[ ! -d "gaia" ]]; then
+    git clone https://github.com/cosmos/gaia.git
+fi
+cd gaia
+git fetch --all --tags
+git checkout v24.0.0
+
+log "Building Gaia (this may take ~2-4 minutes)..."
+make install
+
+log "Gaia version: $(gaiad version)"
+
+########################################
+# NODE INITIALIZATION
+########################################
+
+log "=== Cleaning old data ==="
+rm -rf "$GAIA_HOME"
+
+log "=== Initializing Gaia node ==="
+gaiad init "$MONIKER" --chain-id "$CHAIN_ID" --home "$GAIA_HOME"
+
+########################################
+# DOWNLOAD GENESIS
+########################################
+
+log "=== Downloading Cosmos Hub genesis.json ==="
+download_genesis
+
+########################################
+# SET MIN GAS PRICE
+########################################
+
+log "=== Setting minimum gas prices ==="
+sed -i "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"$MIN_GAS\"|" "$GAIA_HOME/config/app.toml" || \
+    echo "minimum-gas-prices = \"$MIN_GAS\"" >> "$GAIA_HOME/config/app.toml"
+
+########################################
+# ADD PEERS
+########################################
+
+log "=== Adding persistent peers ==="
+sed -i "s|^persistent_peers *=.*|persistent_peers = \"$PEERS\"|" "$GAIA_HOME/config/config.toml"
+
+########################################
+# STATE SYNC CONFIGURATION
+########################################
+
+log "=== Enabling state sync using RPC $RPC ==="
+LATEST_HEIGHT=$(curl -s "$RPC/status" | jq -r '.result.sync_info.latest_block_height')
+TRUST_HEIGHT=$((LATEST_HEIGHT - 5000))
+TRUST_HASH=$(curl -s "$RPC/block?height=$TRUST_HEIGHT" | jq -r '.result.block_id.hash')
+
+log "Latest height: $LATEST_HEIGHT"
+log "Using trust_height: $TRUST_HEIGHT"
+log "Using trust_hash: $TRUST_HASH"
+
+sed -i "s|^enable *=.*|enable = true|" "$GAIA_HOME/config/config.toml"
+sed -i "s|^rpc_servers *=.*|rpc_servers = \"$RPC,$RPC\"|" "$GAIA_HOME/config/config.toml"
+sed -i "s|^trust_height *=.*|trust_height = $TRUST_HEIGHT|" "$GAIA_HOME/config/config.toml"
+sed -i "s|^trust_hash *=.*|trust_hash = \"$TRUST_HASH\"|" "$GAIA_HOME/config/config.toml"
+
+########################################
+# SHOW CONFIG
+########################################
+
+log "=== Config summary ==="
+ls -lh "$GAIA_HOME/config"
+
+########################################
+# START NODE IN TMUX
+########################################
+
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    log "Tmux session already exists. Attaching..."
+    tmux attach -t "$SESSION_NAME"
+else
+    log "Starting Gaia node in tmux session: $SESSION_NAME"
+    tmux new-session -d -s "$SESSION_NAME" \
+        "gaiad start --home '$GAIA_HOME' --minimum-gas-prices='$MIN_GAS'"
+    log "Node started in tmux session. Attach at any time:"
+    log "  tmux attach -t $SESSION_NAME"
+fi
+
+########################################
+# CREATE OR SHOW WALLET
+########################################
+
+if ! gaiad keys list --home "$GAIA_HOME" --keyring-backend test | grep -q "$WALLET_NAME"; then
+    log "Creating wallet: $WALLET_NAME"
+    gaiad keys add "$WALLET_NAME" --home "$GAIA_HOME" --keyring-backend test
+fi
+
+ADDRESS=$(gaiad keys show "$WALLET_NAME" -a --home "$GAIA_HOME" --keyring-backend test)
+log "Wallet address: $ADDRESS"
+
+log "=== DONE ==="
+echo "Check balance (once synced):"
+echo "  gaiad query bank balances $ADDRESS --home $GAIA_HOME"
+echo "Send transactions:"
+echo "  gaiad tx bank send $ADDRESS <to_address> 10uatom --home $GAIA_HOME --fees $MIN_GAS --chain-id $CHAIN_ID"
